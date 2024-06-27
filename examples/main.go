@@ -1,9 +1,8 @@
 package main
 
 import (
+	"slices"
 	"time"
-
-	"golang.org/x/exp/slices"
 )
 
 type A struct {
@@ -26,11 +25,11 @@ func main() {
 		return a.Name > b.Name
 	})
 
-	slices.SortFunc(as, func(a, b A) bool {
-		return a.Ts.Before(b.Ts)
-	})
-
-	slices.SortStableFunc(as, func(a, b A) bool {
-		return a.Ts.After(b.Ts)
-	})
+	// slices.SortFunc(as, func(a, b A) bool {
+	//   return a.Ts.Before(b.Ts)
+	// })
+	//
+	// slices.SortStableFunc(as, func(a, b A) bool {
+	//   return a.Ts.After(b.Ts)
+	// })
 }

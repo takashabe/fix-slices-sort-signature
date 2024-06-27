@@ -37,6 +37,7 @@ func run(filepath string) error {
 	if !strings.HasSuffix(info.Name(), ".go") {
 		return fmt.Errorf("Not a go file: %s", info.Name())
 	}
+	log.Printf("processing %s ...\n", filepath)
 
 	node, err := parser.ParseFile(fset, filepath, nil, parser.ParseComments)
 	if err != nil {
@@ -55,7 +56,12 @@ func run(filepath string) error {
 			return true
 		}
 
-		if !(selExpr.X.(*ast.Ident).Name == "slices" && strings.HasPrefix(selExpr.Sel.Name, "SortFunc")) {
+		// Check if the function is slices.SortFunc
+		ident, ok := selExpr.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if !(ident.Name == "slices" && isSortFuncName(selExpr.Sel.Name)) {
 			return true
 		}
 
@@ -71,54 +77,65 @@ func run(filepath string) error {
 			return true
 		}
 
-		ident, ok := funcLit.Type.Results.List[0].Type.(*ast.Ident)
-		if !ok || ident.Name != "bool" {
-			return true
+		// change the return type from bool to int
+		if ident, ok := funcLit.Type.Results.List[0].Type.(*ast.Ident); ok {
+			if ident.Name != "bool" {
+				return true
+			}
+			ident.Name = "int"
 		}
-
-		// Change the return type to int
-		ident.Name = "int"
 
 		// Update the function body
 		newBody := []ast.Stmt{}
 		for _, stmt := range funcLit.Body.List {
-			// 無名関数で1行で書かれているような単純な式のみを対象とする
-			if stmt, ok := stmt.(*ast.ReturnStmt); ok {
-				for _, expr := range stmt.Results {
-					if binaryExpr, ok := expr.(*ast.BinaryExpr); ok {
-						// compare関数の引数順序を決定する
-						var (
-							firstParam  ast.Expr
-							secondParam ast.Expr
-						)
-						switch binaryExpr.Op {
-						case token.LSS:
-							firstParam = binaryExpr.X
-							secondParam = binaryExpr.Y
-						case token.GTR:
-							firstParam = binaryExpr.Y
-							secondParam = binaryExpr.X
-						}
-
-						newStmt := &ast.ReturnStmt{
-							Results: []ast.Expr{
-								&ast.CallExpr{
-									Fun: &ast.SelectorExpr{
-										X:   ast.NewIdent("cmp"),
-										Sel: ast.NewIdent("Compare"),
-									},
-									Args: []ast.Expr{
-										firstParam,
-										secondParam,
-									},
-								},
-							},
-						}
-						newBody = append(newBody, newStmt)
-					}
+			if retstmt, ok := stmt.(*ast.ReturnStmt); ok {
+				if len(retstmt.Results) != 1 {
+					newBody = append(newBody, stmt)
+					continue
 				}
+				expr, ok := retstmt.Results[0].(*ast.BinaryExpr)
+				if !ok || hasLogicalOperators(expr) {
+					newBody = append(newBody, stmt)
+					continue
+				}
+				// aim to simple expression: a < b, a > b, a == b, a != b
+				// if not, just keep the original statement
+				//
+				// TODO: handle more complex expressions
+				if expr.Op != token.LSS && expr.Op != token.GTR && expr.Op != token.EQL && expr.Op != token.NEQ {
+					newBody = append(newBody, stmt)
+					continue
+				}
+
+				firstParam, secondParam := expr.X, expr.Y
+				switch expr.Op {
+				case token.LSS, token.EQL:
+					firstParam, secondParam = expr.X, expr.Y
+				case token.GTR, token.NEQ:
+					firstParam, secondParam = expr.Y, expr.X
+				}
+
+				newStmt := &ast.ReturnStmt{
+					Results: []ast.Expr{
+						&ast.CallExpr{
+							Fun: &ast.SelectorExpr{
+								X:   ast.NewIdent("cmp"),
+								Sel: ast.NewIdent("Compare"),
+							},
+							Args: []ast.Expr{
+								firstParam,
+								secondParam,
+							},
+						},
+					},
+				}
+				isApply = true
+				newBody = append(newBody, newStmt)
+			} else {
+				newBody = append(newBody, stmt)
 			}
 		}
+
 		funcLit.Body.List = newBody
 		return true
 	}, nil)
@@ -127,6 +144,8 @@ func run(filepath string) error {
 		return nil
 	}
 
+	astutil.AddImport(fset, node, "cmp")
+
 	var buf bytes.Buffer
 	if err := format.Node(&buf, fset, node); err != nil {
 		return fmt.Errorf("Failed to format modified file: %w", err)
@@ -134,6 +153,35 @@ func run(filepath string) error {
 	if err := os.WriteFile(filepath, buf.Bytes(), info.Mode().Perm()); err != nil {
 		return fmt.Errorf("Failed to write modified file: %w", err)
 	}
-	log.Printf("processed %s\n", filepath)
 	return nil
+}
+
+func isSortFuncName(name string) bool {
+	names := []string{
+		"SortFunc",
+		"SortStableFunc",
+	}
+	for _, n := range names {
+		if strings.HasPrefix(name, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLogicalOperators(expr *ast.BinaryExpr) bool {
+	if expr.Op == token.LAND || expr.Op == token.LOR {
+		return true
+	}
+	if left, ok := expr.X.(*ast.BinaryExpr); ok {
+		if hasLogicalOperators(left) {
+			return true
+		}
+	}
+	if right, ok := expr.Y.(*ast.BinaryExpr); ok {
+		if hasLogicalOperators(right) {
+			return true
+		}
+	}
+	return false
 }
